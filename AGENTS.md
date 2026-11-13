@@ -9,7 +9,7 @@
 ## Layout
 
 - `install_syslog_collector.sh` — `syslog-collector` deploy role: rsyslog listeners (UDP/TCP 514, TLS 6514) writing hourly JSON Lines files.
-- `install_syslog_graylog.sh` — `syslog-graylog` deploy role: Graylog Open + Data Node + MongoDB with a TLS syslog input on 1514 and an `lm-reader` user.
+- `install_syslog_graylog.sh` — `syslog-graylog` deploy role: Graylog Open 7.0 + OpenSearch 2.19 + MongoDB 8.0 with a TLS syslog input on 1514 and an `lm-reader` user.
 - `src/store.py` — local store: query, sources, retention, size cap, gzip of closed hours.
 - `src/rsyslog_conf.py` — renders the drop-rule and archive-forward rsyslog files.
 - `src/archives/` — query plugins per archive backend (`BACKENDS`). Forwarding is plain RFC5424 syslog, so any syslog server can be an archive.
