@@ -1,0 +1,30 @@
+name: backmerge
+
+# Thin caller. The back-merge logic lives in ONE place:
+#   lbockenstedt/lm/.github/workflows/backmerge-reusable.yml
+# Read its header before changing anything here. This file owns only the
+# trigger and the token permissions.
+#
+# The trigger is part of the no-loop guarantee: back-merge flows strictly
+# DOWNWARD (main -> {qa,dev}, qa -> dev). Do not add dev as a trigger branch.
+
+on:
+  push:
+    branches: [main, qa]
+
+# A called workflow can only narrow these, never widen them, so this must cover
+# everything backmerge-reusable.yml's job requests.
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write   # to release the back-merge PR's own parked CI run
+
+# No workflow-level `concurrency` here: the reusable queues per repo and per
+# source/target pair at job level, after the matrix has expanded.
+jobs:
+  backmerge:
+    uses: lbockenstedt/lm/.github/workflows/backmerge-reusable.yml@main
+    # Named rather than `inherit`: the only secret the reusable reads, and a
+    # named pass works across repos whatever the account type.
+    secrets:
+      WORKFLOW_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}

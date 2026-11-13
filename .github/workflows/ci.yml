@@ -1,0 +1,88 @@
+name: CI
+
+# Gates the dev -> qa -> main promotion flow. `qa` and `main` require a PR, so
+# without a status check those gates would verify nothing. This job is that
+# check. `dev` also runs on direct push, which contributors are allowed to make.
+
+on:
+  push:
+    branches: [ dev ]
+  pull_request:
+    branches: [ main, qa, dev ]
+  # Sent by lm's spoke-dispatch.yml when lm/core changes on dev: re-test this
+  # repo's dev against that lm commit. Report only; it gates nothing.
+  repository_dispatch:
+    types: [ lm-changed ]
+
+# A newer push to the same branch or PR makes the older run pointless. The
+# event name keeps an lm-changed dispatch from cancelling a dev push run.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Cheap checks first (about 20 s): fleet rules, new ruff errors, twin files
+  # (lm/docs/ci-checks.md). `test` waits for them, so a rule violation fails
+  # the run before the install and test steps start. Dev only: promotion PRs
+  # into qa/main carry commits that already passed here.
+  checks:
+    if: (github.event_name == 'push' && github.ref_name == 'dev') || github.base_ref == 'dev'
+    permissions:
+      contents: read
+    uses: lbockenstedt/lm/.github/workflows/fleet-rules-reusable.yml@main
+
+  test:
+    # Run when checks passed or were skipped (qa/main PRs, lm-changed);
+    # the first step fails the job when checks failed.
+    if: ${{ !cancelled() }}
+    needs: checks
+    runs-on: ubuntu-latest
+    # A hung test otherwise burns the 6 h default and reports nothing.
+    timeout-minutes: 20
+    steps:
+      - name: Stop early when an earlier job failed
+        if: contains(needs.*.result, 'failure')
+        run: |
+          echo "::error::A job this one needs failed (see 'checks'). Tests not run."
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          # Empty (the default ref) except for an lm-changed dispatch.
+          ref: ${{ github.event.client_payload.spoke_ref }}
+      # This repo inherits BaseSpoke from the LM core repo (imported as
+      # `base_spoke` / `core.src.base_spoke`). In dev that resolves via the
+      # sibling lm checkout; alone in CI it fails with
+      # ModuleNotFoundError: No module named 'core', so reproduce the layout.
+      - name: Check out LM core (BaseSpoke dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: lbockenstedt/lm
+          path: _lm
+          sparse-checkout: core
+          # lm main normally; the exact lm commit for an lm-changed dispatch.
+          ref: ${{ github.event.client_payload.lm_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: '**/requirements*.txt'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          # Requirements are NOT always at the repo root -- several repos declare
+          # them per component (lm-spoke/, agent/, core/ ...). Installing only a
+          # root requirements.txt silently left fastapi/httpx/websockets missing
+          # and every test module failed to import. Install all of them.
+          # Non-fatal: a transient index failure must not gate the merge; a
+          # genuinely missing import still fails the test step below.
+          while IFS= read -r req; do
+            echo "installing $req"
+            pip install -r "$req" || true
+          done < <(find . -name 'requirements*.txt' \
+                     -not -path './_lm/*' -not -path '*/venv/*' \
+                     -not -path '*/node_modules/*' | sort)
+      - name: Run tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/_lm:${{ github.workspace }}/_lm/core/src
+        run: pytest -x -q tests

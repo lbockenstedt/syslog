@@ -1,0 +1,56 @@
+name: promote
+
+# Thin caller. The promotion logic -- VERSION pinning, one-unit-per-PR split,
+# PR intent body, parked-run release -- lives in ONE place:
+#   lbockenstedt/lm/.github/workflows/promote-reusable.yml
+# Read its header before changing anything here. This file owns only WHEN a
+# promotion is prepared (the triggers) and the token permissions it may use.
+#
+# PROMOTION IS DELIBERATE, NOT AUTOMATIC: run by hand with `source: dev`
+# (dev -> qa) or `source: qa` (qa -> main). The push trigger below only queues
+# the NEXT dev -> qa unit once qa has advanced; the reusable pins it to that hop
+# and refuses a push to any other branch. Never add dev or main here.
+
+on:
+  push:
+    branches: [qa]
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Source branch to promote from'
+        required: true
+        default: dev
+        type: choice
+        options: [dev, qa]
+      # ab only -- exposes the dev -> main override (see the reusable header):
+      # target:
+      #   description: 'Target branch (auto = the normal next step)'
+      #   required: false
+      #   default: auto
+      #   type: choice
+      #   options: [auto, qa, main]
+  # ab only -- weekday cadence; the reusable fans it out to both normal hops:
+  # schedule:
+  #   - cron: '0 13 * * 1-5'
+
+# A called workflow can only narrow these, never widen them, so this must cover
+# everything promote-reusable.yml's jobs request.
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write   # to release the promotion PR's own parked CI run
+
+# No workflow-level `concurrency` here: the reusable queues per repo and per
+# route at job level, which is the only place the route is known.
+jobs:
+  promote:
+    uses: lbockenstedt/lm/.github/workflows/promote-reusable.yml@main
+    with:
+      # Empty on push/schedule; the reusable routes those by github.event_name.
+      source: ${{ inputs.source }}
+      # ab only:
+      # target: ${{ inputs.target }}
+    # Named rather than `inherit`: the only secret the reusable reads, and a
+    # named pass works across repos whatever the account type.
+    secrets:
+      WORKFLOW_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
