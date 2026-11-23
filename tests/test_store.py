@@ -72,6 +72,31 @@ def test_query_text_with_quotes_matches(tmp_path):
     assert [m["msg"] for m in got] == ['login "bob" denied']
 
 
+def test_query_timeout_mid_file_returns_newest_rows(tmp_path, monkeypatch):
+    """When a query times out mid-file, returned rows must be the newest messages in the file."""
+    root = str(tmp_path)
+    _write(root, [{"ts": NOW - 50 + i} for i in range(50)])
+
+    calls = 0
+    real_monotonic = time.monotonic
+
+    def fake_monotonic():
+        nonlocal calls
+        calls += 1
+        if calls <= 5:
+            return real_monotonic()
+        return real_monotonic() + 1000
+
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
+    res = LocalStore(root).query({"start": NOW - 100, "end": NOW, "limit": 50})
+
+    assert res["truncated"] is True
+    assert len(res["messages"]) > 0
+    ts = [int(m["ts"]) for m in res["messages"]]
+    assert ts[0] == NOW - 1
+    assert all(t >= NOW - 10 for t in ts)
+
+
 def test_housekeep_gzips_deletes_old_and_keeps_current(tmp_path):
     """Closed hours are compressed, hours past retention deleted, the current hour kept."""
     root = str(tmp_path)

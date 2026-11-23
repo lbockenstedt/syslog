@@ -166,14 +166,49 @@ class LocalStore:
         except (OSError, EOFError):
             return
 
+    @staticmethod
+    def _reverse_lines(path: str, block_size: int = 65536) -> Iterator[str]:
+        """Yield lines of a plain or gzipped hour file in reverse order (newest line first)."""
+        if path.endswith(".gz"):
+            try:
+                with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                    lines = fh.readlines()
+                for line in reversed(lines):
+                    yield line
+            except (OSError, EOFError):
+                return
+            return
+
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                pos = f.tell()
+                remaining = b""
+                while pos > 0:
+                    read_size = min(block_size, pos)
+                    pos -= read_size
+                    f.seek(pos)
+                    chunk = f.read(read_size)
+                    data = chunk + remaining
+                    parts = data.split(b"\n")
+                    remaining = parts[0]
+                    for raw in reversed(parts[1:]):
+                        if raw:
+                            yield raw.decode("utf-8", errors="replace")
+                if remaining:
+                    yield remaining.decode("utf-8", errors="replace")
+        except OSError:
+            return
+
     # ---- queries --------------------------------------------------------
 
     def query(self, flt: Dict[str, Any]) -> Dict[str, Any]:
         """Return matching messages newest first, at most ``limit``.
 
-        Files are read newest hour first and stop once the limit is reached,
-        so memory stays bounded by ``limit``. A query that runs past the time
-        budget returns what it has with ``truncated`` set.
+        Files are read newest hour first, and within each file lines are read
+        newest line first, stopping once the limit is reached so memory stays
+        bounded by ``limit``. A query that runs past the time budget returns
+        what it has with ``truncated`` set, guaranteed to be the newest rows.
         """
         # Normalise the limit and the time window.
         limit = max(1, min(int(flt.get("limit") or 500), MAX_LIMIT))
@@ -188,23 +223,23 @@ class LocalStore:
         needle = (flt.get("text") or "").lower()
         if any(c in needle for c in '"\\/') or not needle.isprintable():
             needle = ""
-        # Newest hour first; within an hour keep the newest matches.
+        # Newest hour first; within each hour read newest lines first.
         for f in reversed(self.hour_files()):
             if f["hour"] + 3600 <= start or f["hour"] > end:
                 continue
-            keep: deque = deque(maxlen=limit - len(out))
-            for line in self._lines(f["path"]):
+            for line in self._reverse_lines(f["path"]):
                 if needle and needle not in line.lower():
                     continue
                 msg = parse_line(line)
                 if msg and matches(msg, flt):
-                    keep.append(msg)
+                    out.append(msg)
+                    if len(out) >= limit:
+                        truncated = True
+                        break
                 if time.monotonic() > deadline:
                     truncated = True
                     break
-            out.extend(reversed(keep))
             if len(out) >= limit or truncated:
-                truncated = truncated or len(out) >= limit
                 break
         out.sort(key=lambda m: m["ts"], reverse=True)
         return {"messages": out[:limit], "truncated": truncated}
