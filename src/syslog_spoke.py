@@ -389,6 +389,8 @@ class SyslogSpoke(BaseSpoke):
         generation the caller read under. Raises OSError (old owner kept) when
         the purge fails."""
         with _CLAIM_LOCK:
+            if self._stop.is_set():
+                return self._tenant_gen
             if self.store.claim(self._tenant if tenant is None else tenant):
                 with self._lock:
                     self.tracker = SourceTracker(self.store)
@@ -412,6 +414,8 @@ class SyslogSpoke(BaseSpoke):
         claim lock (no read claims the store for the other tenant mid-move;
         reads wait at most one rsyslog restart)."""
         with self._apply_lock, _CLAIM_LOCK:
+            if self._stop.is_set():
+                return {"status": "ERROR", "message": "spoke stopped"}
             # A role-load tenant not applied yet goes in first; a push overrides it.
             pending, self._startup = self._startup, {}
             data = {**pending, **data}
@@ -815,6 +819,8 @@ class SyslogSpoke(BaseSpoke):
         if not self._apply_lock.acquire(blocking=False):
             return
         try:
+            if self._stop.is_set():
+                return
             state = _run(["systemctl", "is-active", "rsyslog"], 10)["out"]
             if state == "active":
                 return
@@ -828,6 +834,8 @@ class SyslogSpoke(BaseSpoke):
         """One housekeeping pass (split out so tests can drive it). Serialised,
         so an old thread finishing a pass after a reload can't overlap the new one."""
         with self._housekeep_lock:
+            if self._stop.is_set():
+                return
             self._housekeeping_pass(run_retention, now)
 
     def _housekeeping_pass(self, run_retention: bool, now: Optional[float]) -> None:
@@ -856,6 +864,8 @@ class SyslogSpoke(BaseSpoke):
         # Under the claim lock: a gzip that overlapped a tenant purge could put the
         # old tenant's hour back (as .gz) after the purge emptied it.
         with _CLAIM_LOCK:
+            if self._stop.is_set():
+                return
             res = self.store.housekeep(self._setting("retention_hours"), self._setting("max_mb"), now=now)
         if res["gzipped"] or res["deleted"]:
             logger.info("syslog retention: %d hour file(s) compressed, %d deleted, %d MB freed",

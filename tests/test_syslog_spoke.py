@@ -2,6 +2,8 @@
 import asyncio
 import json
 import os
+import threading
+import time
 
 import archives
 import syslog_spoke
@@ -666,3 +668,63 @@ def test_diag_mid_move_withholds_the_old_tenants_details(tmp_path, monkeypatch):
     assert _cmd(spoke, "SYSLOG_CONFIG", {"tenant": "globex"})["status"] == "SUCCESS"
     full = _cmd(spoke, "SYSLOG_DIAG", {})
     assert "moving" not in full and full["settings"]["tenant"] == "globex"
+
+
+def test_stale_housekeeping_does_not_purge_new_tenant(tmp_path, monkeypatch):
+    """An old instance's housekeeping thread blocked on _HOUSEKEEP_LOCK during a role
+    reload must abort when stopped, and not purge the reloaded tenant's store."""
+    monkeypatch.setattr(syslog_spoke, "_run", lambda cmd, timeout=20: {"rc": 0, "out": ""})
+    old_spoke = _spoke(tmp_path, tenant="tenant_a")
+    _write(str(tmp_path / "store"), [{"ts": NOW - 50}])
+    assert old_spoke.store.owner() == "tenant_a"
+
+    # Block on _HOUSEKEEP_LOCK
+    hold_lock = threading.Event()
+    release_lock = threading.Event()
+
+    def _hold():
+        with syslog_spoke._HOUSEKEEP_LOCK:
+            hold_lock.set()
+            release_lock.wait(timeout=10)
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    assert hold_lock.wait(timeout=5)
+
+    tick_done = threading.Event()
+
+    def _run_tick():
+        old_spoke.housekeeping_tick(run_retention=True)
+        tick_done.set()
+
+    tick_thread = threading.Thread(target=_run_tick, daemon=True)
+    tick_thread.start()
+    time.sleep(0.1)
+    assert not tick_done.is_set()
+
+    # Old spoke is stopped during role reload
+    old_spoke.stop_background_loops()
+    assert old_spoke._stop.is_set()
+
+    # New spoke is created for tenant_b and applied
+    new_spoke = _spoke(tmp_path, tenant="tenant_b")
+    res = _cmd(new_spoke, "SYSLOG_CONFIG", {"tenant": "tenant_b"})
+    assert res["status"] == "SUCCESS"
+    assert new_spoke.store.owner() == "tenant_b"
+
+    # Tenant B receives new messages
+    _write(str(tmp_path / "store"), [{"ts": NOW - 10}])
+    hour_files_before = new_spoke.store.hour_files()
+    assert len(hour_files_before) > 0
+
+    # Release the lock so old spoke's tick can proceed
+    release_lock.set()
+    holder.join(timeout=5)
+    tick_thread.join(timeout=5)
+
+    assert tick_done.is_set()
+    # Store owner and messages must still belong to tenant_b, not clobbered back to tenant_a
+    assert new_spoke.store.owner() == "tenant_b"
+    hour_files_after = new_spoke.store.hour_files()
+    assert len(hour_files_after) == len(hour_files_before)
+
