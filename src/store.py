@@ -167,38 +167,49 @@ class LocalStore:
             return
 
     @staticmethod
-    def _reverse_lines(path: str, block_size: int = 65536) -> Iterator[str]:
-        """Yield lines of a plain or gzipped hour file in reverse order (newest line first)."""
-        if path.endswith(".gz"):
-            try:
-                with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
-                    lines = fh.readlines()
-                for line in reversed(lines):
-                    yield line
-            except (OSError, EOFError):
-                return
+    def _reverse_lines_gz(path: str) -> Iterator[str]:
+        """Yield lines from a gzip file in reverse order."""
+        try:
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+            # Yield lines from newest to oldest.
+            for line in reversed(lines):
+                yield line
+        except (OSError, EOFError):
             return
 
+    @staticmethod
+    def _reverse_lines_plain(path: str, block_size: int = 65536) -> Iterator[str]:
+        """Yield lines from a plain file in reverse order using chunked backwards seek."""
         try:
             with open(path, "rb") as f:
                 f.seek(0, 2)
-                pos = f.tell()
-                remaining = b""
+                pos, remaining = f.tell(), b""
+                # Step 1: Read backwards in chunks from EOF.
                 while pos > 0:
                     read_size = min(block_size, pos)
                     pos -= read_size
                     f.seek(pos)
                     chunk = f.read(read_size)
-                    data = chunk + remaining
-                    parts = data.split(b"\n")
+                    parts = (chunk + remaining).split(b"\n")
                     remaining = parts[0]
+                    # Step 2: Yield complete lines in reverse order.
                     for raw in reversed(parts[1:]):
                         if raw:
                             yield raw.decode("utf-8", errors="replace")
+                # Step 3: Yield the first line of the file.
                 if remaining:
                     yield remaining.decode("utf-8", errors="replace")
         except OSError:
             return
+
+    @staticmethod
+    def _reverse_lines(path: str, block_size: int = 65536) -> Iterator[str]:
+        """Yield lines of an hour file in reverse order (newest line first)."""
+        if path.endswith(".gz"):
+            yield from LocalStore._reverse_lines_gz(path)
+        else:
+            yield from LocalStore._reverse_lines_plain(path, block_size)
 
     # ---- queries --------------------------------------------------------
 
